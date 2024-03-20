@@ -1,0 +1,99 @@
+-- ====================================================
+-- Author: Paul Gomez, PhD
+-- Date:   March 20, 2024
+-- 
+-- The challenge here is to obtain specific invoice 
+-- changes that happened to bookings stored in Seaware, 
+-- a Cruise Line Reservation System.
+-- The database is an Oracle 19c instance.
+-- The history is stored as compressed blobs that
+-- have XML documents on table RES_HISTORY.
+-- ====================================================
+
+-- VC = Voyage Charges, CF = Cruise Fare:
+CREATE TABLE REV.VOYAGE_CHARGES_DROPPED
+(RES_ID INT, VC_LAST_DATE DATE, VC_TRANS_ID INT, VC_PERFORMER VARCHAR2(50), VC_AMOUNT NUMBER(13,2),
+CF_FIRST_DATE DATE, CF_TRANS_ID INT, CF_PERFORMER VARCHAR2(50), CF_AMOUNT NUMBER(13,2));
+
+-- ==================================================
+-- Extract XML info from History.
+-- The XML info is stored on a compressed BLOB column
+-- ==================================================
+CREATE TABLE REV.RES_HIST_XML AS
+SELECT 
+RES_ID, 
+TRANS_TIMESTAMP,
+TRANS_ID,
+PERFORMER,
+RES_XML
+FROM       
+(
+SELECT RES_ID, TRANS_TIMESTAMP, TRANS_ID, PERFORMER,
+XMLTYPE( TO_CLOB(utl_compress.lz_uncompress(RES_XML), 873, 'text/xml'))  RES_XML
+FROM SEAWARE.RES_HISTORY      
+WHERE 
+RES_XML IS NOT NULL );
+
+
+TRUNCATE TABLE REV.VOYAGE_CHARGES_DROPPED;
+
+-- =================================================================================
+-- Load history records holding VOYAGE CHARGES. These were the first invoice items,
+-- later replaced by CRUISE FARE invoice item types. We need to know when that 
+-- change took place, and who did it (performer).
+-- Load the last record for each booking (RES_ID) with VC.
+-- =================================================================================
+INSERT INTO REV.VOYAGE_CHARGES_DROPPED (RES_ID, VC_LAST_DATE, VC_TRANS_ID, VC_PERFORMER, VC_AMOUNT)
+SELECT RES_ID, TRUNC(TRANS_TIMESTAMP) TRANS_TIMESTAMP, TRANS_ID, PERFORMER, AMOUNT
+FROM (
+SELECT HX.RES_ID, HX.TRANS_TIMESTAMP, HX.TRANS_ID, HX.PERFORMER,  XMLTBL.AMOUNT,
+ROW_NUMBER() OVER (PARTITION BY RES_ID ORDER BY RES_ID, TRANS_TIMESTAMP DESC) ROWNBR
+FROM ( 
+SELECT * FROM  REV.RES_HIST_XML 
+WHERE EXISTSNODE(RES_XML, '/ResHistory/ResShell/ResInvoice/ResInvoiceItem[Type="VOYAGE CHARGES"]') = 1
+) HX,
+XMLTABLE ('/ResHistory/ResShell/ResInvoice/ResInvoiceItem'
+PASSING HX.RES_XML
+COLUMNS
+INVOICE_TYPE  VARCHAR2(50) PATH 'Type',
+AMOUNT        VARCHAR2(50) PATH 'Amount'
+) 
+XMLTBL
+)
+WHERE ROWNBR = 1;
+-- 776 rows inserted.
+COMMIT;
+
+-- ========================================================================
+-- Update records that now have CRUISE FARE invoice items that replace the
+-- previous VOYAGE CHARGES transactions.
+-- Load the first record for each matching booking (RES_ID).
+-- ========================================================================
+MERGE INTO REV.VOYAGE_CHARGES_DROPPED PO
+USING (
+SELECT RES_ID, TRUNC(TRANS_TIMESTAMP) TRANS_TIMESTAMP, TRANS_ID, PERFORMER, AMOUNT
+FROM (
+SELECT HX.RES_ID, HX.TRANS_TIMESTAMP, HX.TRANS_ID, HX.PERFORMER,  XMLTBL.AMOUNT,
+ROW_NUMBER() OVER (PARTITION BY RES_ID ORDER BY RES_ID, TRANS_TIMESTAMP ASC) ROWNBR
+FROM ( 
+SELECT * FROM  REV.RES_HIST_XML 
+WHERE EXISTSNODE(RES_XML, '/ResHistory/ResShell/ResInvoice/ResInvoiceItem[Type="CRUISE FARE"]') = 1
+) HX,
+XMLTABLE ('/ResHistory/ResShell/ResInvoice/ResInvoiceItem'
+PASSING HX.RES_XML
+COLUMNS
+INVOICE_TYPE  VARCHAR2(50) PATH 'Type',
+AMOUNT        VARCHAR2(50) PATH 'Amount'
+) 
+XMLTBL
+)
+WHERE ROWNBR = 1) HIST
+ON (HIST.RES_ID = PO.RES_ID)
+WHEN MATCHED THEN UPDATE
+     SET CF_FIRST_DATE = HIST.TRANS_TIMESTAMP,
+         CF_TRANS_ID   = HIST.TRANS_ID,
+         CF_PERFORMER  = HIST.PERFORMER,
+         CF_AMOUNT     = HIST.AMOUNT;
+--  89 rows merged.    
+COMMIT;
+-- *** THE END ***
