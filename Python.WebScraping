@@ -1,1 +1,97 @@
-Web Scraping example.
+#===========================================================================
+# Author: Paul Gomez, PhD
+# Date:   April, 2024
+# Summary: This program extracts product data from a website (web scraping)
+# and stores it in a SQL Server database
+#===========================================================================
+from selenium import webdriver
+import time
+from datetime import datetime as dt
+import requests
+from bs4 import BeautifulSoup
+import pyodbc 
+
+#====================
+def ScrollPage (url):
+#====================
+   driver = webdriver.Chrome()
+   driver.get(url)
+   # scroll down to the bottom of the page
+   while True:
+      driver.execute_script('window.scrollBy(0, 1000)')
+      time.sleep(3)
+      if driver.execute_script('return window.innerHeight + window.pageYOffset >= document.body.offsetHeight'):
+         break
+
+   return driver.page_source
+
+#====================================================
+def ImportProduct (page_source, category_ID, conn):
+#====================================================
+   soup = BeautifulSoup(page_source,features='html.parser')
+
+   csr = conn.cursor()
+
+   items = soup.find_all('div', class_="item")
+   for item in items:
+       name = item.find('div',class_="item__name").text.strip()
+       url = item.find('a')['href']
+       ix = url.find('-/p')
+       jx = url.rfind('-',0,ix)
+       itemID = url[jx+1:ix]
+       image_url = item.find('img')['src']
+       #print(image_url)
+       price = item.find('span',class_="item__price")
+       if price != None:          
+          price = price.text.strip()          
+          ix = price.find('\n')
+          if ix > 1:          
+             price = price[0:ix]         
+          price=price.replace('$','')
+          price=price.replace(' ','')
+          price=price.replace(',','')
+          price=price.replace('.','')
+          #print(price)
+          SQL = "EXEC IMPORT_PRODUCT @STORE_ID =?, @BRAND_ID =?, @CATEGORY_ID =?, @SKU =?, @DESCRIPTION =?, @SEX =?, @PRICE =?, @SALE_PRICE =?, @URL =?, @IMAGE_URL =? "
+          values = (1001, 6501, category_ID, itemID, name,'F', price, '0.00', url, image_url) 
+          csr.execute(SQL, (values))
+
+   csr.close()      
+   return items    
+          
+#=============================================================================
+# MAIN PROGRAM
+#=============================================================================
+conn = pyodbc.connect('Driver={SQL Server};'
+                      'Server=PGPC\SQL2019;'
+                      'Database=nbt_******;'
+                      'UID=pgomez;PWD=***********;'
+                      'autocommit=True'
+                      )
+cursor = conn.cursor()
+print("Start Time: ", dt.now())
+
+params = (1001) # Store ID (Studio F)
+urls = cursor.execute('EXEC GET_STORE_URL ?', params)
+
+store_url = urls.fetchall()
+cursor.close()
+
+# Process all store URLs:
+for store_link in store_url:
+    category_ID = store_link[0]
+    url = store_link[1]
+    page_source = ScrollPage (url)
+    items = ImportProduct (page_source, category_ID, conn)
+    print(category_ID)
+    print(url)
+
+conn.close()
+print("DONE")
+
+print("Stop Time: ", dt.now())
+#close webdriver
+#driver.quit()
+
+# *** THE END *** 
+
